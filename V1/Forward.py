@@ -189,31 +189,52 @@ class MoEFeedForward(nn.Module):
 # Attention + Block
 # ----------------------------
 class SelfAttention(nn.Module):
-    def __init__(self, cfg: MoEEngramConfig):
+    def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
         self.out = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.ln = nn.LayerNorm(cfg.d_model)
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, T, D = x.shape
-        h = self.ln(x)
-        qkv = self.qkv(h).view(B, T, 3, self.cfg.n_heads, D // self.cfg.n_heads)
-        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]  # [B, T, H, Hd]
+    def forward(self, x, attn_mask=None, past_kv=None, use_cache=False):
+        """
+        x: [B, T_new, D]
+        past_kv: (k_cache, v_cache) or None
+        returns: y, present_kv (if use_cache)
+        """
+        B, T_new, D = x.shape
+        H = self.cfg.n_heads
+        Hd = D // H
 
-        q = q.transpose(1, 2)  # [B, H, T, Hd]
+        h = self.ln(x)
+        qkv = self.qkv(h).view(B, T_new, 3, H, Hd)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        q = q.transpose(1, 2)   # [B, H, T_new, Hd]
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1))  # [B, H, T, T]
+        if past_kv is not None:
+            k_cache, v_cache = past_kv
+            # append
+            k = torch.cat([k_cache, k], dim=2)   # [B,H,T_total,Hd]
+            v = torch.cat([v_cache, v], dim=2)
+
+        T_total = k.size(2)
+
+        att = (q @ k.transpose(-2, -1)) / (Hd ** 0.5)  # [B,H,T_new,T_total]
+
+        # causal mask for incremental: only need mask future positions, but since q is only new tokens,
+        # you can build a small mask or rely on flash-attn causal=True.
         if attn_mask is not None:
-            att = att + attn_mask  # broadcastable
+            att = att + attn_mask
 
         att = F.softmax(att, dim=-1).to(v.dtype)
-        y = att @ v  # [B, H, T, Hd]
-        y = y.transpose(1, 2).contiguous().view(B, T, D)
-        return x + self.out(y)
+        y = att @ v  # [B,H,T_new,Hd]
+        y = y.transpose(1, 2).contiguous().view(B, T_new, D)
+
+        y = x + self.out(y)
+        present = (k, v) if use_cache else None
+        return y, present
 
 
 class TransformerBlock(nn.Module):
