@@ -1,3 +1,12 @@
+import math
+from typing import Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from SafeMOE import SafeMoE, MoEConfig
+
 class MultiheadSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, attn_dropout: float = 0.0):
         super().__init__()

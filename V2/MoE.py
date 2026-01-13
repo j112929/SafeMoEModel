@@ -122,12 +122,12 @@ class EPMoE(nn.Module):
 
         # AllToAll: send token features
         x_recv = _all_to_all_varying(x_send, send_counts, recv_counts, group=self.group)  # [R, D]
-        local_recv = _all_to_all_varying(local_send.unsqueeze(-1).to(torch.float32),
-                                         send_counts, recv_counts, group=self.group).squeeze(-1).to(torch.int64)
-        token_recv = _all_to_all_varying(token_send.unsqueeze(-1).to(torch.float32),
-                                         send_counts, recv_counts, group=self.group).squeeze(-1).to(torch.int64)
-        w_recv = _all_to_all_varying(w_send.unsqueeze(-1).to(torch.float32),
-                                     send_counts, recv_counts, group=self.group).squeeze(-1).to(x.dtype)
+        local_recv = _all_to_all_varying(local_send.unsqueeze(-1),
+                                         send_counts, recv_counts, group=self.group).squeeze(-1)
+        token_recv = _all_to_all_varying(token_send.unsqueeze(-1),
+                                         send_counts, recv_counts, group=self.group).squeeze(-1)
+        w_recv = _all_to_all_varying(w_send.unsqueeze(-1),
+                                     send_counts, recv_counts, group=self.group).squeeze(-1)
 
         # 5) expert compute on recv side: group by local expert
         R = x_recv.size(0)
@@ -165,10 +165,10 @@ class EPMoE(nn.Module):
         recv_counts_back = send_counts
 
         y_sendback = _all_to_all_varying(y_recv.contiguous(), send_counts_back, recv_counts_back, group=self.group)
-        tok_sendback = _all_to_all_varying(tok_recv.unsqueeze(-1).to(torch.float32),
-                                           send_counts_back, recv_counts_back, group=self.group).squeeze(-1).to(torch.int64)
-        w_sendback = _all_to_all_varying(ww_recv.unsqueeze(-1).to(torch.float32),
-                                         send_counts_back, recv_counts_back, group=self.group).squeeze(-1).to(x.dtype)
+        tok_sendback = _all_to_all_varying(tok_recv.unsqueeze(-1),
+                                           send_counts_back, recv_counts_back, group=self.group).squeeze(-1)
+        w_sendback = _all_to_all_varying(ww_recv.unsqueeze(-1),
+                                         send_counts_back, recv_counts_back, group=self.group).squeeze(-1)
 
         # 7) combine on source
         y_flat = torch.zeros((N, D), device=x.device, dtype=x.dtype)
