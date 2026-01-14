@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from safemoe.post_train import PreferenceConfig, PreferenceLoss
+from safemoe.training.post_train import PreferenceConfig, PreferenceLoss
 
 class TestPreferenceLoss(unittest.TestCase):
     def setUp(self):

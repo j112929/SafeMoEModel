@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict, Optional
 
-from .config import MoEConfig
+from ..config import MoEConfig
 
 class ExpertFFN(nn.Module):
     def __init__(self, d_model: int, d_ff: int, activation="gelu"):

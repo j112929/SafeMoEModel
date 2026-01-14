@@ -59,6 +59,24 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+
+class RotaryEmbedding(nn.Module):
+    """
+    Alias for RoPEMultiheadAttention to match usage in other files.
+    Or more accurately, RotaryEmbedding usually refers to the freq computation logic.
+    For this specific import error, we will alias RoPEMultiheadAttention if that's what was intended, 
+    but based on typical usage, RotaryEmbedding might be a separate class.
+    Let's check safemoe/__init__.py. It exports "RotaryEmbedding".
+    rope.py usually defines the rotary mechanism.
+    Let's defined RotaryEmbedding as a wrapper around precompute/apply or just renaming.
+    """
+    def __init__(self, dim: int, max_seq_len: int = 4096, theta: float = 10000.0):
+        super().__init__()
+        self.register_buffer("freqs_cis", precompute_freqs_cis(dim, max_seq_len, theta))
+
+    def forward(self, xq, xk):
+        return apply_rotary_emb(xq, xk, self.freqs_cis)
+
 class RoPEMultiheadAttention(nn.Module):
     """
     Multi-head Self-Attention with Rotary Positional Embeddings.

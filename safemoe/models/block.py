@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .config import MoEConfig
-from .attention import MultiheadSelfAttention
+from ..config import MoEConfig
+from ..layers.attention import MultiheadSelfAttention
 from .moe import SafeMoE
 
 class TransformerBlockSafeMoE(nn.Module):

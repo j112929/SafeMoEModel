@@ -30,29 +30,31 @@ Whether you are building the next reasoning model or an efficient long-context a
 SafeMoEModel/
 ├── safemoe/                    # Main Package
 │   ├── __init__.py             # Public API exports
-│   ├── config.py               # MoEConfig dataclass
-│   ├── moe.py                  # Core SafeMoE implementation
-│   ├── moe_vectorized.py       # Optimized vectorized SafeMoE
-│   ├── attention.py            # Multi-head self-attention
-│   ├── rope.py                 # RoPE positional embeddings
-│   ├── block.py                # TransformerBlockSafeMoE
-│   ├── analysis.py             # Routing visualization tools
-│   ├── engram.py               # N-gram memory augmentation
-│   ├── cache.py                # KV Cache for inference
-│   └── inference.py            # Generation utilities
-├── examples/                   # Training Scripts
-│   ├── train_demo.py           # Basic training demo
-│   ├── sft_demo.py             # SFT with HuggingFace Trainer
-│   └── dpo_demo.py             # DPO preference alignment demo
-├── hf_integration/             # HuggingFace Compatible Models
-│   └── safe_moe_hf.py          # PreTrainedModel implementation
-├── tests/                      # Unit Tests
-│   ├── test_safety.py          # Safety mechanism tests
-│   ├── test_new_modules.py     # RoPE, Vectorized MoE tests
-│   ├── test_engram_cache.py    # Engram & KV Cache tests
-│   ├── test_distributed.py     # Distributed tests
-│   ├── test_distributed_optimized.py # Optimized distributed tests
-│   └── test_ssm.py             # SSM tests
+│   ├── config.py               # Centralized Configurations
+│   ├── agent.py                # Agent & Tool Definitions
+│   ├── inference.py            # High-level Inference Engine
+│   ├── layers/                 # Foundational Layers
+│   │   ├── attention.py        # MultiHead & Grouped Query Attention
+│   │   ├── rope.py             # Rotary Positional Embeddings
+│   │   ├── cache.py            # KV Cache for Autoregression
+│   │   └── engram.py           # N-gram Memory
+│   ├── models/                 # Model Architectures
+│   │   ├── moe.py              # Standard SafeMoE
+│   │   ├── moe_vectorized.py   # Vectorized SafeMoE
+│   │   ├── distributed_optimized.py # SwiGLU + Distributed Expert Parallel
+│   │   ├── ssm.py              # Mamba 2 Mixer (SSD)
+│   │   └── block.py            # Transformer Blocks
+│   └── training/               # Training Components
+│       ├── post_train.py       # DPO/ORPO/SimPO Losses
+│       └── reasoning.py        # GRPO + Verifier Logic
+├── examples/                   # Usage Examples
+│   ├── benchmark_moe.py        # Performance benchmarks
+│   └── train_demo.py           # Training demos
+├── tests/                      # Comprehensive Test Suite
+│   ├── test_agent.py           # Agent capabilities
+│   ├── test_reasoning.py       # GRPO/RL tests
+│   ├── test_post_train.py      # Preference learning tests
+│   └── ...
 └── requirements.txt            # Dependencies
 ```
 

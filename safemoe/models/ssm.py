@@ -10,16 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from ..config import MambaConfig, OptimizedDistributedMoEConfig
 
-@dataclass
-class MambaConfig:
-    d_model: int = 512
-    d_state: int = 64     # SSM state expansion factor (N)
-    d_conv: int = 4       # Local convolution width
-    expand: int = 2       # Block expansion factor
-    headdim: int = 64     # Head dimension (P)
-    ngroups: int = 1      # Number of groups for GQA-style behavior
-    chunk_size: int = 256 # Chunk size for efficient computation
+
 
 class Mamba2Mixer(nn.Module):
     """

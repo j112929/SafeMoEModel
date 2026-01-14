@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 import math
+from ..config import OptimizedDistributedMoEConfig
 
 # Conditional import for distributed
 try:
@@ -28,32 +29,7 @@ except ImportError:
     HAS_DIST = False
 
 
-@dataclass
-class OptimizedDistributedMoEConfig:
-    """Configuration for Optimized Distributed SafeMoE."""
-    d_model: int = 512
-    d_ff: int = 2048
-    n_experts_global: int = 8
-    top_k: int = 2
-    capacity_factor: float = 1.25
-    min_capacity: int = 4
-    n_shared_experts: int = 0  # Shared experts (per device or global?) Usually local per rank if duplicated, or just local.
-    
-    # Safety
-    route_threshold: float = 0.0
-    use_fallback: bool = True
-    
-    # Auxiliary losses
-    router_z_loss: float = 1e-3
-    load_balance_loss: float = 1e-2
-    router_dropout: float = 0.0
-    
-    # Performance
-    activation: str = "silu"  # silu, gelu, relu
-    use_bias: bool = False    # Bias in expert FFN
-    
-    # Distributed
-    expert_parallel_group: Optional[object] = None
+
 
 
 def _all_to_all_varying(x, send_counts, recv_counts, group=None):
@@ -583,7 +559,7 @@ class OptimizedDistributedSafeMoEBlock(nn.Module):
         resid_dropout: float = 0.0,
     ):
         super().__init__()
-        from .attention import MultiheadSelfAttention
+        from ..layers.attention import MultiheadSelfAttention
         
         self.norm1 = nn.LayerNorm(d_model)
         self.attn = MultiheadSelfAttention(d_model, n_heads, n_kv_heads=n_kv_heads, attn_dropout=attn_dropout)

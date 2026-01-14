@@ -8,17 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Tuple, Optional
+from ..config import EngramConfig
 
 
-@dataclass
-class EngramConfig:
-    """Configuration for Engram Memory."""
-    d_model: int = 512
-    ngram_sizes: Tuple[int, ...] = (2, 3, 4)  # Which n-grams to use
-    n_hashes: int = 2                          # Number of hash functions (reduces collision)
-    table_size: int = 500_000                  # Size of each embedding table
-    dropout: float = 0.0
-    init_gate_bias: float = -3.0               # Start with small memory contribution
+
 
 
 class NGramHasher:
@@ -211,7 +204,7 @@ class EngramTransformerBlock(nn.Module):
     ):
         super().__init__()
         from .attention import MultiheadSelfAttention
-        from .moe import DenseFFN
+        from ..models.moe import DenseFFN
         
         self.engram = EngramMemory(engram_config) if engram_config else None
         
@@ -254,3 +247,8 @@ class EngramTransformerBlock(nn.Module):
         x = x + h
         
         return x
+
+# Alias
+class EngramLayer(EngramMemory):
+    """Alias for EngramMemory to match safe_moe exports."""
+    pass

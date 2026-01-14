@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 import math
-
+from ..config import DistributedMoEConfig
 # Conditional import for distributed
 try:
     import torch.distributed as dist
@@ -24,27 +24,7 @@ except ImportError:
     HAS_DIST = False
 
 
-@dataclass
-class DistributedMoEConfig:
-    """Configuration for Distributed SafeMoE."""
-    d_model: int = 512
-    d_ff: int = 2048
-    n_experts_global: int = 8          # Total experts across all ranks
-    top_k: int = 2
-    capacity_factor: float = 1.25
-    min_capacity: int = 4
-    
-    # Safety
-    route_threshold: float = 0.0       # Low-confidence fallback threshold
-    use_fallback: bool = True          # Whether to use dense fallback
-    
-    # Auxiliary losses
-    router_z_loss: float = 1e-3
-    load_balance_loss: float = 1e-2
-    router_dropout: float = 0.0
-    
-    # Distributed
-    expert_parallel_group: Optional[object] = None  # Process group for EP
+
 
 
 class ExpertFFN(nn.Module):

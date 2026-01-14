@@ -206,3 +206,8 @@ class InferenceEngine:
     ) -> List[str]:
         """Generate for multiple prompts."""
         return [self.generate(p, **kwargs) for p in prompts]
+
+# Alias
+class SafeMoEGenerator(InferenceEngine):
+    """Alias for InferenceEngine matching SafeMoE export style."""
+    pass

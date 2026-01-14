@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict
 
-from .config import MoEConfig
+from ..config import MoEConfig
 
 
 class ExpertFFN(nn.Module):
