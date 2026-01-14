@@ -1,6 +1,6 @@
 torch>=2.0.0
-transformers
-trl
-peft
-accelerate
+transformers>=4.40.0
+triton>=2.1.0; platform_system == "Linux"
+accelerate>=0.21.0
 datasets
+trl>=0.8.0  # For DPO, ORPO, SFTTrainer

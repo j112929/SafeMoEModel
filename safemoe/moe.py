@@ -1,27 +1,9 @@
-import math
-from dataclasses import dataclass
-from typing import Optional, Tuple, Dict
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple, Dict, Optional
 
-
-@dataclass
-class MoEConfig:
-    d_model: int
-    d_ff: int
-    n_experts: int
-    top_k: int = 2
-    capacity_factor: float = 1.25        # 安全阈：>1 提供余量
-    min_capacity: int = 4                # 防止小 batch 下 capacity=0
-    router_z_loss: float = 1e-3          # router logits 的 z-loss（稳定训练）
-    load_balance_loss: float = 1e-2      # 负载均衡辅助损失
-    router_dropout: float = 0.0          # 路由 dropout（可选）
-    score_scale: float = 1.0             # router logits scale
-    route_threshold: float = 0.0         # 低置信度阈值：<阈值触发fallback
-    use_softmax_router: bool = True      # softmax 或者 sigmoid gating（这里默认softmax）
-
+from .config import MoEConfig
 
 class ExpertFFN(nn.Module):
     def __init__(self, d_model: int, d_ff: int, activation="gelu"):
@@ -94,7 +76,15 @@ class TopKRouter(nn.Module):
             "load_balance_loss": lb_loss * self.cfg.load_balance_loss,
             "router_logits_mean": logits.mean().detach(),
         }
-        return topk_experts, topk_scores, aux
+        # Pick relevant raw probability for thresholding decisions.
+        # We return the values corresponding to the selected indices.
+        # Note: torch.topk returns values (prob) and indices.
+        # We already computed topk_scores (normalized).
+        # We also need original topk values from 'probs' for thresholding check.
+        # Actually topk() on probs gives exactly that if we did it on probs.
+        topk_raw_probs, _ = torch.topk(probs, k=self.cfg.top_k, dim=-1)
+
+        return topk_experts, topk_scores, aux, topk_raw_probs
 
 
 class SafeMoE(nn.Module):
@@ -129,7 +119,7 @@ class SafeMoE(nn.Module):
         T = B * S
         x_flat = x.reshape(T, D)
 
-        topk_experts, topk_scores, aux = self.router(x_flat)  # [T,k], [T,k]
+        topk_experts, topk_scores, aux, topk_raw = self.router(x_flat)  # [T,k], [T,k], dict, [T,k]
 
         cap = self._capacity(T)
         device = x.device
@@ -138,8 +128,9 @@ class SafeMoE(nn.Module):
         fallback_mask = torch.zeros(T, dtype=torch.bool, device=device)
 
         # 低置信度 fallback：如果 top1 score < threshold
+        # ALWAYS check raw probability, not normalized one.
         if self.cfg.route_threshold > 0:
-            low_conf = topk_scores[:, 0] < self.cfg.route_threshold
+            low_conf = topk_raw[:, 0] < self.cfg.route_threshold
             fallback_mask |= low_conf
 
         # 输出缓冲

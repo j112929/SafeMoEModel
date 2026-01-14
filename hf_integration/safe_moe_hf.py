@@ -177,7 +177,8 @@ class TopKRouter(nn.Module):
             "router_z_loss": z_loss * self.config.moe_router_z_loss,
             "load_balance_loss": lb_loss * self.config.moe_load_balance_loss,
         }
-        return topk_experts, topk_scores, aux
+        topk_raw_probs, _ = torch.topk(probs, k=self.config.moe_top_k, dim=-1)
+        return topk_experts, topk_scores, aux, topk_raw_probs
 
 
 class SafeMoE(nn.Module):
@@ -207,7 +208,7 @@ class SafeMoE(nn.Module):
         T = B * S
         x_flat = x.view(T, D)
 
-        topk_experts, topk_scores, aux = self.router(x_flat)  # [T,k], [T,k]
+        topk_experts, topk_scores, aux, topk_raw = self.router(x_flat)  # [T,k], [T,k]
 
         cap = self._capacity(T)
         device = x.device
@@ -216,7 +217,7 @@ class SafeMoE(nn.Module):
 
         # low confidence fallback
         if self.config.moe_route_threshold > 0:
-            fallback_mask |= (topk_scores[:, 0] < self.config.moe_route_threshold)
+            fallback_mask |= (topk_raw[:, 0] < self.config.moe_route_threshold)
 
         y_flat = torch.zeros_like(x_flat)
 

@@ -1,8 +1,10 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-from SafeMOE import MoEConfig
-from MultiheadSelfAttention import TransformerBlockSafeMoE
+from safemoe import MoEConfig, TransformerBlockSafeMoE
 
 def test_training_loop():
     print("Initializing MoE Config...")
