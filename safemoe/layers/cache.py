@@ -227,7 +227,7 @@ class CachedSafeMoEBlock(nn.Module):
         max_seq_len: int = 4096,
     ):
         super().__init__()
-        from .moe import SafeMoE
+        from ..models.moe import SafeMoE
         
         self.norm1 = nn.LayerNorm(d_model)
         self.attn = MultiheadSelfAttentionWithCache(

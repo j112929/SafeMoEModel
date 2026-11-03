@@ -209,7 +209,7 @@ class EngramTransformerBlock(nn.Module):
         self.engram = EngramMemory(engram_config) if engram_config else None
         
         self.norm1 = nn.LayerNorm(d_model)
-        self.attn = MultiheadSelfAttention(d_model, n_heads, attn_dropout)
+        self.attn = MultiheadSelfAttention(d_model, n_heads, attn_dropout=attn_dropout)
         
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn = DenseFFN(d_model, d_ff)

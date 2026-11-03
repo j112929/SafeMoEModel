@@ -10,7 +10,7 @@ from .models.distributed_optimized import (
 from .models.ssm import Mamba2Mixer, MambaSafeMoEBlock
 
 from .layers.attention import MultiheadSelfAttention
-from .layers.rope import RoPEMultiheadAttention, RMSNorm, precompute_freqs_cis, apply_rotary_emb
+from .layers.rope import RotaryEmbedding, RoPEMultiheadAttention, RMSNorm, precompute_freqs_cis, apply_rotary_emb
 from .layers.engram import EngramMemory, EngramTransformerBlock, NGramHasher
 from .layers.cache import KVCache, MultiheadSelfAttentionWithCache, CachedTransformerBlock, CachedSafeMoEBlock
 

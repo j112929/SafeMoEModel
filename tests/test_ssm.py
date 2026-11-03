@@ -8,8 +8,8 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from safemoe.ssm import MambaConfig, Mamba2Mixer, MambaSafeMoEBlock
-from safemoe.distributed_optimized import OptimizedDistributedMoEConfig
+from safemoe.models.ssm import MambaConfig, Mamba2Mixer, MambaSafeMoEBlock
+from safemoe.models.distributed_optimized import OptimizedDistributedMoEConfig
 
 class TestMambaMixer(unittest.TestCase):
     def setUp(self):

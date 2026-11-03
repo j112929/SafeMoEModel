@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from safemoe.models.routing import plan_routes, routing_stats, apply_routes
 
 
 # -----------------------
@@ -202,83 +203,16 @@ class SafeMoE(nn.Module):
         cap = int(self.config.moe_capacity_factor * (T * self.config.moe_top_k / self.config.moe_num_experts))
         return max(cap, self.config.moe_min_capacity)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-        # x: [B,S,D]
+    def forward(self, x):
         B, S, D = x.shape
-        T = B * S
-        x_flat = x.view(T, D)
-
-        topk_experts, topk_scores, aux, topk_raw = self.router(x_flat)  # [T,k], [T,k]
-
-        cap = self._capacity(T)
-        device = x.device
-
-        fallback_mask = torch.zeros(T, dtype=torch.bool, device=device)
-
-        # low confidence fallback
-        if self.config.moe_route_threshold > 0:
-            fallback_mask |= (topk_raw[:, 0] < self.config.moe_route_threshold)
-
-        y_flat = torch.zeros_like(x_flat)
-
-        # precompute fallback where needed
-        if fallback_mask.any():
-            y_flat[fallback_mask] = self.fallback(x_flat[fallback_mask])
-
-        overflow_total = 0
-        usage = torch.zeros(self.config.moe_num_experts, device=device)
-
-        for e in range(self.config.moe_num_experts):
-            mask_k = (topk_experts == e)
-            if not mask_k.any():
-                continue
-
-            tok_idx, k_idx = torch.where(mask_k)
-            if tok_idx.numel() == 0:
-                continue
-
-            # sort by tok_idx for stability
-            order = torch.argsort(tok_idx)
-            tok_idx = tok_idx[order]
-            k_idx = k_idx[order]
-
-            # remove already-fallback tokens
-            keep = ~fallback_mask[tok_idx]
-            tok_idx = tok_idx[keep]
-            k_idx = k_idx[keep]
-            if tok_idx.numel() == 0:
-                continue
-
-            # capacity truncate => overflow fallback
-            if tok_idx.numel() > cap:
-                overflow = tok_idx.numel() - cap
-                overflow_total += overflow
-
-                overflow_idx = tok_idx[cap:]
-                fallback_mask[overflow_idx] = True
-                y_flat[overflow_idx] = self.fallback(x_flat[overflow_idx])
-
-                tok_idx = tok_idx[:cap]
-                k_idx = k_idx[:cap]
-
-            usage[e] += tok_idx.numel()
-
-            x_e = x_flat[tok_idx]  # [Ne,D]
-            y_e = self.experts[e](x_e)
-            w_e = topk_scores[tok_idx, k_idx].unsqueeze(-1)  # [Ne,1]
-            y_flat[tok_idx] += y_e * w_e
-
-        stats = {
-            "moe_capacity": torch.tensor(cap, device=device),
-            "overflow_tokens": torch.tensor(overflow_total, device=device),
-            "overflow_rate": torch.tensor(float(overflow_total) / float(max(1, T)), device=device),
-            "fallback_rate": fallback_mask.float().mean(),
-            "expert_usage_mean": usage.mean() / float(max(1, T)),
-            "expert_usage_max": usage.max() / float(max(1, T)),
-            "expert_usage_min": usage.min() / float(max(1, T)),
-        }
-
-        return y_flat.view(B, S, D), aux, stats
+        flat = x.reshape(-1, D)
+        experts, scores, aux, raw = self.router(flat)
+        capacity = self._capacity(flat.size(0))
+        plan = plan_routes(experts, scores, raw, capacity,
+                           self.config.moe_route_threshold, self.config.moe_num_experts)
+        output = apply_routes(flat, plan, self.config.moe_num_experts,
+                              lambda e, tokens: self.experts[e](tokens), self.fallback)
+        return output.reshape(B, S, D), aux, routing_stats(plan, capacity, flat.size(0))
 
 
 class SafeMoETransformerBlock(nn.Module):

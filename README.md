@@ -96,9 +96,30 @@ Implement "Always-On" experts that process every token to capture common knowled
 
 ## Installation
 
+Requires Python 3.10 or newer. From the repository root:
+
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+For the core layers only, use `python -m pip install -e .`. Training examples
+use the `training` extra; plotting uses `plotting`; tests use `dev`. The core
+requires PyTorch 2.10 or newer, including the fix for CVE-2026-24747. Resolve
+and record a complete environment for each experiment; these dependency ranges
+are not a reproducibility lockfile.
+
+Capacity is enforced across all top-k assignments. If any assignment overflows,
+the entire token uses the dense fallback exactly once; shared experts remain
+active. `overflow_tokens` counts distinct overflowing tokens. With
+`use_fallback=False`, those whole-token routed contributions are dropped.
+
+The HF LM currently has no KV cache. `generate_with_cache` recomputes its full
+prefix when no cache is returned, preserving history without claiming a cache
+speedup. Expert parallelism uses differentiable variable-split exchanges. All
+ranks must participate in forward and backward, including zero-send ranks.
+The layer does not synchronize replicated router/shared/fallback parameters;
+the training integration must synchronize those separately from sharded experts.
+
 
 ## Quick Start
 
@@ -219,7 +240,7 @@ y, aux, stats = model(x)
 Train your model to reason (Chain-of-Thought) using Group Relative Policy Optimization, the method behind DeepSeekMath.
 
 ```python
-from safemoe.reasoning import ReasoningConfig, GRPOLoss, VerifierHead
+from safemoe.training.reasoning import ReasoningConfig, GRPOLoss, VerifierHead
 
 # 1. Config
 rl_cfg = ReasoningConfig(group_size=16, kl_beta=0.04)
@@ -266,7 +287,7 @@ messages = agent.run("What's the weather in Tokyo?")
 We provide a unified loss module for preference alignment, supporting state-of-the-art methods.
 
 ```python
-from safemoe.post_train import PreferenceConfig, PreferenceLoss
+from safemoe.training.post_train import PreferenceConfig, PreferenceLoss
 
 # 1. DPO (Direct Preference Optimization)
 cfg = PreferenceConfig(method="dpo", beta=0.1)
