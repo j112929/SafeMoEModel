@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, Optional
 
 from ..config import MoEConfig
+from .routing import plan_routes, routing_stats, apply_routes
 
 class ExpertFFN(nn.Module):
     def __init__(self, d_model: int, d_ff: int, activation="gelu"):
@@ -107,110 +108,13 @@ class SafeMoE(nn.Module):
         cap = int(self.cfg.capacity_factor * (T * self.cfg.top_k / self.cfg.n_experts))
         return max(cap, self.cfg.min_capacity)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-        """
-        x: [B, S, D]
-        returns:
-          y: [B, S, D]
-          aux_losses: dict
-          stats: dict
-        """
+    def forward(self, x):
         B, S, D = x.shape
-        T = B * S
-        x_flat = x.reshape(T, D)
-
-        topk_experts, topk_scores, aux, topk_raw = self.router(x_flat)  # [T,k], [T,k], dict, [T,k]
-
-        cap = self._capacity(T)
-        device = x.device
-
-        # 记录：哪些 token 走了 fallback（低置信度或容量溢出）
-        fallback_mask = torch.zeros(T, dtype=torch.bool, device=device)
-
-        # 低置信度 fallback：如果 top1 score < threshold
-        # ALWAYS check raw probability, not normalized one.
-        if self.cfg.route_threshold > 0:
-            low_conf = topk_raw[:, 0] < self.cfg.route_threshold
-            fallback_mask |= low_conf
-
-        # 输出缓冲
-        y_flat = torch.zeros_like(x_flat)
-
-        # 先算 fallback 输出（必要时再覆盖）
-        if fallback_mask.any():
-            y_fb = self.fallback(x_flat[fallback_mask])
-            y_flat[fallback_mask] = y_fb
-
-        # 对每个 expert：收集 token -> 计算 -> scatter 回去
-        # 注意：这是清晰实现，性能优化可用 grouped GEMM / all-to-all / fused router
-        overflow_total = 0
-        usage = torch.zeros(self.cfg.n_experts, device=device)
-
-        for e in range(self.cfg.n_experts):
-            # 找所有路由到 expert e 的 (token_index, which_k)
-            # mask_k: [T,k]
-            mask_k = (topk_experts == e)  # bool
-            if not mask_k.any():
-                continue
-
-            # token indices for this expert (可能重复：同一 token 的不同 k 路由到不同 expert)
-            tok_idx, k_idx = torch.where(mask_k)  # both [N]
-            if tok_idx.numel() == 0:
-                continue
-
-            # 排序以稳定（可选）
-            # (稳定性对复现/线上排查有帮助)
-            order = torch.argsort(tok_idx)
-            tok_idx = tok_idx[order]
-            k_idx = k_idx[order]
-
-            # 去掉已经 fallback 的 token（低置信度）
-            keep = ~fallback_mask[tok_idx]
-            tok_idx = tok_idx[keep]
-            k_idx = k_idx[keep]
-            if tok_idx.numel() == 0:
-                continue
-
-            # 容量截断
-            if tok_idx.numel() > cap:
-                overflow = tok_idx.numel() - cap
-                overflow_total += overflow
-
-                # 超出 capacity 的 token 走 fallback（如果未算过 fallback，这里补算）
-                overflow_idx = tok_idx[cap:]
-                # 标记 fallback
-                fallback_mask[overflow_idx] = True
-                # 如果这些 token 之前没写入 y_flat，就补写
-                # （这里简单起见：直接用 dense 计算覆盖）
-                y_flat[overflow_idx] = self.fallback(x_flat[overflow_idx])
-
-                tok_idx = tok_idx[:cap]
-                k_idx = k_idx[:cap]
-
-            usage[e] += tok_idx.numel()
-
-            x_e = x_flat[tok_idx]                          # [Ne, D]
-            y_e = self.experts[e](x_e)                     # [Ne, D]
-            w_e = topk_scores[tok_idx, k_idx].unsqueeze(-1)  # [Ne, 1]
-
-            # 按权重累加回 token 输出（top-k mixture）
-            y_flat[tok_idx] += y_e * w_e
-
-        # stats
-        stats = {
-            "moe_capacity": torch.tensor(cap, device=device),
-            "overflow_tokens": torch.tensor(overflow_total, device=device),
-            "overflow_rate": torch.tensor(float(overflow_total) / float(max(1, T)), device=device),
-            "fallback_rate": fallback_mask.float().mean(),
-            "expert_usage_mean": usage.mean() / max(1.0, float(S * B)),
-            "expert_usage_max": usage.max() / max(1.0, float(S * B)),
-            "expert_usage_min": usage.min() / max(1.0, float(S * B)),
-        }
-
-        # 合并 aux losses
-        aux_losses = aux
-        # 如果你希望对 overflow 做惩罚，也可加一项
-        # aux_losses["overflow_penalty"] = stats["overflow_rate"] * 0.0
-
-        y = y_flat.reshape(B, S, D)
-        return y, aux_losses, stats
+        flat = x.reshape(-1, D)
+        experts, scores, aux, raw = self.router(flat)
+        capacity = self._capacity(flat.size(0))
+        plan = plan_routes(experts, scores, raw, capacity,
+                           self.cfg.route_threshold, self.cfg.n_experts)
+        output = apply_routes(flat, plan, self.cfg.n_experts,
+                              lambda e, tokens: self.experts[e](tokens), self.fallback)
+        return output.reshape(B, S, D), aux, routing_stats(plan, capacity, flat.size(0))

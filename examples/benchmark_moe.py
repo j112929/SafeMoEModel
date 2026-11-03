@@ -10,8 +10,8 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from safemoe import MoEConfig, SafeMoE
-from safemoe.moe_vectorized import VectorizedSafeMoE
-from safemoe.distributed_optimized import OptimizedDistributedMoEConfig, OptimizedDistributedSafeMoE
+from safemoe.models.moe_vectorized import VectorizedSafeMoE
+from safemoe.models.distributed_optimized import OptimizedDistributedMoEConfig, OptimizedDistributedSafeMoE
 
 
 def benchmark_model(model, x, warmup=5, iterations=20, name="Model"):

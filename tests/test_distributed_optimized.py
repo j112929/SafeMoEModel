@@ -8,7 +8,7 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from safemoe.distributed_optimized import (
+from safemoe.models.distributed_optimized import (
     OptimizedDistributedMoEConfig,
     OptimizedDistributedSafeMoE,
     OptimizedDistributedSafeMoEBlock,

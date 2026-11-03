@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safemoe-model"
+version = "0.1.0"
+description = "Mixture-of-experts research layers and training utilities"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = ["torch>=2.10,<3"]
+
+[project.optional-dependencies]
+training = [
+    "transformers>=4.57.3,<5",
+    "datasets>=4.4,<5",
+    "accelerate>=1.10,<2",
+]
+plotting = ["matplotlib>=3.8"]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["safemoe*", "hf_integration*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["distributed: two-process expert-parallel correctness checks"]

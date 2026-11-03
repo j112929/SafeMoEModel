@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 import math
+from .routing import plan_routes
+from .communication import _all_to_all_varying, _exchange_counts, distributed_expert_forward
 from ..config import OptimizedDistributedMoEConfig
 
 # Conditional import for distributed
@@ -30,30 +32,6 @@ except ImportError:
 
 
 
-
-
-def _all_to_all_varying(x, send_counts, recv_counts, group=None):
-    """Variable-length AllToAll communication."""
-    if not HAS_DIST or not dist.is_initialized():
-        return x
-    
-    assert x.is_contiguous()
-    x_splits = list(x.split(send_counts.tolist(), dim=0))
-    y_splits = [
-        torch.empty((int(rc), x.size(-1)), device=x.device, dtype=x.dtype)
-        for rc in recv_counts.tolist()
-    ]
-    dist.all_to_all(y_splits, x_splits, group=group)
-    return torch.cat(y_splits, dim=0)
-
-
-def _exchange_counts(send_counts, group=None):
-    """Exchange send counts between ranks."""
-    if not HAS_DIST or not dist.is_initialized():
-        return send_counts
-    recv_counts = torch.empty_like(send_counts)
-    dist.all_to_all_single(recv_counts, send_counts, group=group)
-    return recv_counts
 
 
 class VectorizedExpertLayer(nn.Module):
@@ -295,82 +273,11 @@ class OptimizedDistributedSafeMoE(nn.Module):
         
         return topk_experts, topk_scores, topk_raw, aux
     
-    def _apply_capacity_vectorized(
-        self,
-        x: torch.Tensor,
-        topk_experts: torch.Tensor,
-        topk_scores: torch.Tensor,
-        topk_raw: torch.Tensor,
-        capacity: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """
-        Vectorized capacity control using segment operations.
-        Returns tokens that pass capacity check and tracks overflow.
-        """
-        T, D = x.shape
-        device = x.device
-        
-        # Low-confidence fallback
-        fallback_mask = torch.zeros(T, dtype=torch.bool, device=device)
-        if self.cfg.route_threshold > 0:
-            fallback_mask |= (topk_raw[:, 0] < self.cfg.route_threshold)
-        
-        # Expand to (token, k) pairs
-        M = T * self.cfg.top_k
-        flat_experts = topk_experts.reshape(M)
-        flat_scores = topk_scores.reshape(M)
-        flat_token_idx = torch.arange(T, device=device).repeat_interleave(self.cfg.top_k)
-        
-        # Remove already-fallback tokens
-        valid = ~fallback_mask[flat_token_idx]
-        flat_experts = flat_experts[valid]
-        flat_scores = flat_scores[valid]
-        flat_token_idx = flat_token_idx[valid]
-        
-        M_valid = flat_experts.numel()
-        if M_valid == 0:
-            return (
-                torch.empty(0, D, device=device),
-                torch.empty(0, dtype=torch.long, device=device),
-                torch.empty(0, device=device),
-                torch.empty(0, dtype=torch.long, device=device),
-                torch.ones(T, dtype=torch.bool, device=device),
-                0
-            )
-        
-        # Sort by expert for segment processing
-        order = torch.argsort(flat_experts, stable=True)
-        flat_experts = flat_experts[order]
-        flat_scores = flat_scores[order]
-        flat_token_idx = flat_token_idx[order]
-        
-        # Compute position within each expert segment
-        seg_change = torch.ones(M_valid, dtype=torch.bool, device=device)
-        seg_change[1:] = flat_experts[1:] != flat_experts[:-1]
-        
-        # Position = current_index - segment_start
-        seg_starts = torch.where(
-            seg_change,
-            torch.arange(M_valid, device=device),
-            torch.zeros(M_valid, dtype=torch.long, device=device)
-        ).cummax(dim=0).values
-        pos_in_seg = torch.arange(M_valid, device=device) - seg_starts
-        
-        # Keep only within capacity
-        keep = pos_in_seg < capacity
-        overflow_count = (~keep).sum().item()
-        
-        # Mark overflow tokens for fallback
-        overflow_token_idx = flat_token_idx[~keep].unique()
-        fallback_mask[overflow_token_idx] = True
-        
-        # Filter
-        kept_x = x[flat_token_idx[keep]]
-        kept_experts = flat_experts[keep]
-        kept_scores = flat_scores[keep]
-        kept_token_idx = flat_token_idx[keep]
-        
-        return kept_x, kept_experts, kept_scores, kept_token_idx, fallback_mask, overflow_count
+    def _apply_capacity_vectorized(self, x, topk_experts, topk_scores, topk_raw, capacity):
+        plan = plan_routes(topk_experts, topk_scores, topk_raw, capacity,
+                           self.cfg.route_threshold, self.cfg.n_experts_global)
+        return (x[plan.token_indices], plan.expert_indices, plan.scores,
+                plan.token_indices, plan.fallback_mask, plan.overflow_tokens)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict, Dict]:
         """
@@ -410,7 +317,7 @@ class OptimizedDistributedSafeMoE(nn.Module):
             y_flat[fallback_mask] = y_flat[fallback_mask] + self.fallback(x_flat[fallback_mask])
         
         # 5. Expert computation
-        if kept_x.numel() > 0:
+        if self.world_size > 1 or kept_x.numel() > 0:
             if self.world_size > 1:
                 y_expert = self._distributed_expert_forward(
                     kept_x, kept_experts, kept_scores, kept_token_idx, T
@@ -455,95 +362,15 @@ class OptimizedDistributedSafeMoE(nn.Module):
         
         # Weighted scatter back
         y_flat = torch.zeros(total_tokens, D, device=device, dtype=x.dtype)
-        y_flat.index_add_(0, token_idx, y_e * scores.unsqueeze(-1))
+        y_flat.index_add_(0, token_idx, (y_e * scores.unsqueeze(-1)).to(y_flat.dtype))
         
         return y_flat
     
-    def _distributed_expert_forward(
-        self,
-        x: torch.Tensor,
-        experts: torch.Tensor,
-        scores: torch.Tensor,
-        token_idx: torch.Tensor,
-        total_tokens: int,
-    ) -> torch.Tensor:
-        """
-        Distributed expert forward with AllToAll.
-        Uses vectorized expert computation on receiving side.
-        """
-        device = x.device
-        D = x.size(1)
-        P = self.world_size
-        
-        # Compute target rank and local expert
-        tgt_rank = experts // self.n_local_experts
-        tgt_local = experts % self.n_local_experts
-        
-        # Sort by target rank
-        order = torch.argsort(tgt_rank, stable=True)
-        x_sorted = x[order].contiguous()
-        tgt_local_sorted = tgt_local[order].contiguous()
-        token_idx_sorted = token_idx[order].contiguous()
-        scores_sorted = scores[order].contiguous()
-        tgt_rank_sorted = tgt_rank[order]
-        
-        # Send counts
-        send_counts = torch.bincount(tgt_rank_sorted, minlength=P).to(torch.int64).cpu()
-        recv_counts = _exchange_counts(send_counts, self.group)
-        
-        # AllToAll: tokens to target ranks
-        x_recv = _all_to_all_varying(x_sorted, send_counts, recv_counts, self.group)
-        local_recv = _all_to_all_varying(
-            tgt_local_sorted.unsqueeze(-1),
-            send_counts, recv_counts, self.group
-        ).squeeze(-1)
-        token_recv = _all_to_all_varying(
-            token_idx_sorted.unsqueeze(-1),
-            send_counts, recv_counts, self.group
-        ).squeeze(-1)
-        scores_recv = _all_to_all_varying(
-            scores_sorted.unsqueeze(-1),
-            send_counts, recv_counts, self.group
-        ).squeeze(-1)
-        
-        # Process with vectorized experts
-        R = x_recv.size(0)
-        if R > 0:
-            # Sort by local expert for grouped processing
-            le_order = torch.argsort(local_recv, stable=True)
-            x_e = x_recv[le_order]
-            le = local_recv[le_order]
-            
-            # Vectorized expert forward
-            y_e = self.experts.forward_grouped(x_e, le)
-            
-            # Undo sort
-            inv_order = torch.empty_like(le_order)
-            inv_order[le_order] = torch.arange(R, device=device)
-            y_recv = y_e[inv_order]
-        else:
-            y_recv = torch.empty(0, D, device=device, dtype=x.dtype)
-        
-        # AllToAll: results back
-        send_counts_back = recv_counts
-        recv_counts_back = send_counts
-        
-        y_back = _all_to_all_varying(y_recv.contiguous(), send_counts_back, recv_counts_back, self.group)
-        token_back = _all_to_all_varying(
-            token_recv.unsqueeze(-1),
-            send_counts_back, recv_counts_back, self.group
-        ).squeeze(-1)
-        scores_back = _all_to_all_varying(
-            scores_recv.unsqueeze(-1),
-            send_counts_back, recv_counts_back, self.group
-        ).squeeze(-1)
-        
-        # Combine
-        y_flat = torch.zeros(total_tokens, D, device=device, dtype=x.dtype)
-        if y_back.numel() > 0:
-            y_flat.index_add_(0, token_back, y_back * scores_back.unsqueeze(-1))
-        
-        return y_flat
+    def _distributed_expert_forward(self, x, experts, scores, token_idx, total_tokens):
+        return distributed_expert_forward(
+            x, experts, scores, token_idx, total_tokens,
+            self.n_local_experts, self.group, self.experts.forward_grouped,
+        )
 
 
 class OptimizedDistributedSafeMoEBlock(nn.Module):

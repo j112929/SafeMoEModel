@@ -38,7 +38,7 @@ def top_k_top_p_filtering(
     """
     if top_k > 0:
         # Remove tokens with probability less than the top_k
-        indices_to_remove = logits < torch.topk(logits, top_k, dim=-1).values[..., -1, None]
+        indices_to_remove = logits < torch.topk(logits, min(top_k, logits.size(-1)), dim=-1).values[..., -1, None]
         logits = logits.masked_fill(indices_to_remove, filter_value)
     
     if top_p < 1.0:
@@ -62,87 +62,62 @@ def top_k_top_p_filtering(
 
 
 @torch.no_grad()
-def generate_with_cache(
-    model,
-    input_ids: torch.Tensor,
-    config: GenerationConfig,
-    tokenizer=None,
-) -> torch.Tensor:
+def generate_with_cache(model, input_ids, config, tokenizer=None):
+    """Generate with real caches, or recompute the full prefix when unavailable.
+
+    Models return either (logits, cache) or an object with logits and optional
+    past_key_values. A missing cache always means full-prefix recomputation.
     """
-    Generate text using KV cache for efficient autoregressive generation.
-    
-    This is a reference implementation. For production, use model-specific
-    generate() methods that handle edge cases better.
-    
-    Args:
-        model: Model with forward(input_ids, use_cache=True) -> (logits, caches)
-        input_ids: [batch, seq_len] initial tokens
-        config: Generation configuration
-        tokenizer: Optional tokenizer for decoding (for debugging)
-        
-    Returns:
-        generated_ids: [batch, seq_len + new_tokens]
-    """
-    device = input_ids.device
-    batch_size = input_ids.size(0)
-    
-    # Track generated tokens
+    if input_ids.ndim != 2 or input_ids.size(1) == 0:
+        raise ValueError('input_ids must contain a nonempty prompt per row')
+    if config.max_new_tokens < 0:
+        raise ValueError('max_new_tokens must be nonnegative')
+    if config.do_sample and config.temperature <= 0:
+        raise ValueError('sampling temperature must be positive')
     generated = input_ids.clone()
-    
-    # Process initial prompt (prefill)
-    # Note: This assumes model returns (logits, list_of_kv_caches)
-    # You may need to adapt this to your model's interface
-    outputs = model(input_ids, use_cache=True)
-    
-    # Handle different output formats
-    if isinstance(outputs, tuple):
-        logits = outputs[0]  # [B, T, V]
-        caches = outputs[1] if len(outputs) > 1 else None
-    else:
-        logits = outputs.logits if hasattr(outputs, 'logits') else outputs
-        caches = outputs.past_key_values if hasattr(outputs, 'past_key_values') else None
-    
-    # Get logits for last position
-    next_token_logits = logits[:, -1, :]  # [B, V]
-    
-    for step in range(config.max_new_tokens):
-        # Apply temperature
-        if config.temperature != 1.0:
-            next_token_logits = next_token_logits / config.temperature
-        
-        # Apply filtering
-        if config.do_sample:
-            filtered_logits = top_k_top_p_filtering(
-                next_token_logits,
-                top_k=config.top_k,
-                top_p=config.top_p
-            )
-            probs = F.softmax(filtered_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-        else:
-            # Greedy
-            next_token = next_token_logits.argmax(dim=-1, keepdim=True)
-        
-        # Append to generated
-        generated = torch.cat([generated, next_token], dim=-1)
-        
-        # Check for EOS
-        if config.eos_token_id is not None:
-            if (next_token == config.eos_token_id).all():
-                break
-        
-        # Forward with cache (only new token)
-        outputs = model(next_token, past_key_values=caches, use_cache=True)
-        
+    if config.max_new_tokens == 0:
+        return generated
+
+    def unpack(outputs):
         if isinstance(outputs, tuple):
-            logits = outputs[0]
-            caches = outputs[1] if len(outputs) > 1 else caches
+            return outputs[0], outputs[1] if len(outputs) > 1 else None
+        return (getattr(outputs, 'logits', outputs),
+                getattr(outputs, 'past_key_values', None))
+
+    def has_cache(cache):
+        if cache is None:
+            return False
+        if isinstance(cache, (list, tuple)):
+            return len(cache) > 0
+        if hasattr(cache, 'get_seq_length'):
+            return cache.get_seq_length() > 0
+        return True
+
+    logits, caches = unpack(model(generated, use_cache=True))
+    finished = torch.zeros(input_ids.size(0), dtype=torch.bool, device=input_ids.device)
+    for step in range(config.max_new_tokens):
+        next_logits = logits[:, -1, :]
+        if config.do_sample:
+            filtered = top_k_top_p_filtering(
+                next_logits / config.temperature, config.top_k, config.top_p
+            )
+            next_token = torch.multinomial(F.softmax(filtered, dim=-1), 1)
         else:
-            logits = outputs.logits if hasattr(outputs, 'logits') else outputs
-            caches = outputs.past_key_values if hasattr(outputs, 'past_key_values') else caches
-        
-        next_token_logits = logits[:, -1, :]
-    
+            next_token = next_logits.argmax(dim=-1, keepdim=True)
+        if config.eos_token_id is not None:
+            pad_id = config.pad_token_id
+            if pad_id is None:
+                pad_id = config.eos_token_id
+            next_token = torch.where(finished[:, None], pad_id, next_token)
+            finished = finished | (next_token[:, 0] == config.eos_token_id)
+        generated = torch.cat((generated, next_token), dim=-1)
+        if finished.all() or step + 1 == config.max_new_tokens:
+            break
+        if has_cache(caches):
+            outputs = model(next_token, past_key_values=caches, use_cache=True)
+        else:
+            outputs = model(generated, use_cache=True)
+        logits, caches = unpack(outputs)
     return generated
 
 

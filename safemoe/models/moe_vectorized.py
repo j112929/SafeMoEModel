@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from typing import Tuple, Dict
 
 from ..config import MoEConfig
+from .routing import plan_routes, routing_stats, apply_routes
 
 
 class ExpertFFN(nn.Module):
@@ -132,91 +133,17 @@ class VectorizedSafeMoE(nn.Module):
         out = torch.einsum('nf,nfd->nd', hidden, w2)
         return out
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    def forward(self, x):
         B, S, D = x.shape
-        T = B * S
-        x_flat = x.reshape(T, D)
-        device = x.device
-
-        # 1. Routing
-        topk_experts, topk_scores, aux, topk_raw = self.router(x_flat)
-        cap = self._capacity(T)
-        
-        # Initialize output buffer
-        y_flat = torch.zeros_like(x_flat)
-        
-        # 2. Shared Experts (Always On)
-        if self.shared is not None:
-            # Shared experts see all tokens
-            y_shared = self.shared(x_flat)
-            y_flat = y_flat + y_shared
-        
-        # 3. Low confidence fallback mask
-        fallback_mask = torch.zeros(T, dtype=torch.bool, device=device)
-        if self.cfg.route_threshold > 0:
-            fallback_mask |= (topk_raw[:, 0] < self.cfg.route_threshold)
-
-        # Process fallback tokens first
-        if fallback_mask.any():
-            y_fallback = self.fallback(x_flat[fallback_mask])
-            y_flat[fallback_mask] = y_flat[fallback_mask] + y_fallback
-
-        # 4. Routed Experts
-        overflow_total = 0
-        usage = torch.zeros(self.cfg.n_experts, device=device)
-
-        for k in range(self.cfg.top_k):
-            expert_ids = topk_experts[:, k]  # [T]
-            scores_k = topk_scores[:, k]     # [T]
-            
-            # Skip already-fallback tokens
-            valid_mask = ~fallback_mask
-            
-            # Process each expert with capacity constraint
-            for e in range(self.cfg.n_experts):
-                mask_e = (expert_ids == e) & valid_mask
-                if not mask_e.any():
-                    continue
-                
-                tok_idx = mask_e.nonzero(as_tuple=True)[0]
-                
-                # Capacity truncation
-                if tok_idx.numel() > cap:
-                    overflow = tok_idx.numel() - cap
-                    overflow_total += overflow
-                    
-                    overflow_idx = tok_idx[cap:]
-                    
-                    # Overflow tokens go to fallback (if not already there)
-                    # Note: They get added to y_flat. We should be careful not to double add if we had a dedicated fallback path.
-                    # Here we treat overflow as a dynamic fallback.
-                    y_fallback = self.fallback(x_flat[overflow_idx])
-                    y_flat[overflow_idx] = y_flat[overflow_idx] + y_fallback
-                    
-                    tok_idx = tok_idx[:cap]
-                
-                if tok_idx.numel() == 0:
-                    continue
-                
-                usage[e] += tok_idx.numel()
-                
-                # Batched expert computation
-                x_e = x_flat[tok_idx]
-                expert_idx = torch.full((tok_idx.numel(),), e, device=device, dtype=torch.long)
-                y_e = self._expert_forward_batched(x_e, expert_idx)
-                w_e = scores_k[tok_idx].unsqueeze(-1)
-                
-                y_flat[tok_idx] = y_flat[tok_idx] + y_e * w_e
-
-        stats = {
-            "moe_capacity": torch.tensor(cap, device=device),
-            "overflow_tokens": torch.tensor(overflow_total, device=device),
-            "overflow_rate": torch.tensor(float(overflow_total) / float(max(1, T)), device=device),
-            "fallback_rate": fallback_mask.float().mean(),
-            "expert_usage_mean": usage.mean() / max(1.0, float(T)),
-            "expert_usage_max": usage.max() / max(1.0, float(T)),
-            "expert_usage_min": usage.min() / max(1.0, float(T)),
-            "shared_experts": 1 if self.shared is not None else 0,
-        }
-
-        return y_flat.reshape(B, S, D), aux, stats
+        flat = x.reshape(-1, D)
+        experts, scores, aux, raw = self.router(flat)
+        capacity = self._capacity(flat.size(0))
+        plan = plan_routes(experts, scores, raw, capacity,
+                           self.cfg.route_threshold, self.cfg.n_experts)
+        def expert_forward(e, tokens):
+            return (self.act(tokens @ self.w1[e]) * (tokens @ self.w3[e])) @ self.w2[e]
+        output = apply_routes(flat, plan, self.cfg.n_experts, expert_forward,
+                              self.fallback, self.shared)
+        stats = routing_stats(plan, capacity, flat.size(0))
+        stats['shared_experts'] = int(self.shared is not None)
+        return output.reshape(B, S, D), aux, stats
